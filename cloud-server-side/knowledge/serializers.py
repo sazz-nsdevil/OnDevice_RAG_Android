@@ -15,16 +15,24 @@ class CourseSerializer(serializers.ModelSerializer):
 
 class ChunkSerializer(serializers.ModelSerializer):
     """Chunks with vectors - use for download/export only"""
+    document_title = serializers.CharField(source='document.title', read_only=True)
+    document_file = serializers.CharField(source='document.file.name', read_only=True)
+    course_code = serializers.CharField(source='document.course.code', read_only=True)
+    
     class Meta:
         model = Chunk
-        fields = ['id', 'text', 'chunk_index', 'vector', 'embedding_model']
+        fields = ['id', 'text', 'chunk_index', 'vector', 'embedding_model', 'document_title', 'document_file', 'course_code']
 
 
 class ChunkSummarySerializer(serializers.ModelSerializer):
     """Chunks without vectors - for API responses"""
+    document_title = serializers.CharField(source='document.title', read_only=True)
+    document_file = serializers.CharField(source='document.file.name', read_only=True)
+    course_code = serializers.CharField(source='document.course.code', read_only=True)
+    
     class Meta:
         model = Chunk
-        fields = ['id', 'text', 'chunk_index', 'embedding_model']
+        fields = ['id', 'text', 'chunk_index', 'embedding_model', 'document_title', 'document_file', 'course_code', 'created_at']
 
 
 class DocumentSerializer(serializers.ModelSerializer):

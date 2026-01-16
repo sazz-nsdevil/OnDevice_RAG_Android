@@ -11,7 +11,7 @@ import tempfile
 from .models import Course, Document, Chunk
 from .serializers import (
     CourseSerializer, DocumentSerializer, DocumentDetailSerializer,
-    DocumentUploadSerializer, ChunkSerializer
+    DocumentUploadSerializer, ChunkSerializer, ChunkSummarySerializer
 )
 from .services import (
     EmbeddingService, ChunkingService, DocumentParsingService
@@ -198,5 +198,5 @@ class DocumentViewSet(viewsets.ModelViewSet):
         """Get chunks for a document"""
         document = self.get_object()
         chunks = document.chunks.all()
-        serializer = ChunkSerializer(chunks, many=True)
+        serializer = ChunkSummarySerializer(chunks, many=True)
         return Response(serializer.data)
