@@ -1,63 +1,61 @@
 from rest_framework import serializers
-from .models import Grade, Subject, Document, Chunk, Embedding, VectorSnapshot
+from .models import Course, Document, Chunk
 
 
-class GradeSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Grade
-        fields = ['id', 'name', 'description', 'created_at']
-
-
-class SubjectSerializer(serializers.ModelSerializer):
-    grade_name = serializers.CharField(source='grade.name', read_only=True)
+class CourseSerializer(serializers.ModelSerializer):
+    document_count = serializers.SerializerMethodField()
     
     class Meta:
-        model = Subject
-        fields = ['id', 'name', 'description', 'grade', 'grade_name', 'created_at']
+        model = Course
+        fields = ['id', 'code', 'name', 'description', 'document_count', 'created_at', 'updated_at']
+    
+    def get_document_count(self, obj):
+        return obj.documents.count()
 
 
 class ChunkSerializer(serializers.ModelSerializer):
+    """Chunks with vectors - use for download/export only"""
     class Meta:
         model = Chunk
-        fields = ['id', 'text', 'chunk_index']
+        fields = ['id', 'text', 'chunk_index', 'vector', 'embedding_model']
 
 
-class EmbeddingSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Embedding
-        fields = ['id', 'vector', 'embedding_model']
-
-
-class ChunkWithEmbeddingSerializer(serializers.ModelSerializer):
-    embedding = EmbeddingSerializer(read_only=True)
-    
+class ChunkSummarySerializer(serializers.ModelSerializer):
+    """Chunks without vectors - for API responses"""
     class Meta:
         model = Chunk
-        fields = ['id', 'text', 'chunk_index', 'embedding']
+        fields = ['id', 'text', 'chunk_index', 'embedding_model']
 
 
 class DocumentSerializer(serializers.ModelSerializer):
-    chunks = ChunkWithEmbeddingSerializer(many=True, read_only=True)
-    subject_name = serializers.CharField(source='subject.name', read_only=True)
-    grade_name = serializers.CharField(source='subject.grade.name', read_only=True)
+    """Document without chunks - for list/retrieve"""
+    course_code = serializers.CharField(source='course.code', read_only=True)
+    chunk_count = serializers.SerializerMethodField()
     
     class Meta:
         model = Document
-        fields = ['id', 'title', 'file', 'subject', 'subject_name', 'grade_name', 'file_type', 'created_at', 'chunks']
+        fields = ['id', 'title', 'course', 'course_code', 'file', 'file_type', 'chunk_count', 'created_at']
+    
+    def get_chunk_count(self, obj):
+        return obj.chunks.count()
+
+
+class DocumentDetailSerializer(serializers.ModelSerializer):
+    """Document with chunk summaries (no vectors)"""
+    chunks = ChunkSummarySerializer(many=True, read_only=True)
+    course_code = serializers.CharField(source='course.code', read_only=True)
+    chunk_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Document
+        fields = ['id', 'title', 'course', 'course_code', 'file', 'file_type', 'chunk_count', 'created_at', 'chunks']
+    
+    def get_chunk_count(self, obj):
+        return obj.chunks.count()
 
 
 class DocumentUploadSerializer(serializers.ModelSerializer):
+    """For uploading documents"""
     class Meta:
         model = Document
-        fields = ['id', 'title', 'file', 'subject', 'file_type']
-
-
-class VectorSnapshotSerializer(serializers.ModelSerializer):
-    grade_name = serializers.CharField(source='grade.name', read_only=True)
-    subject_name = serializers.CharField(source='subject.name', read_only=True)
-    subject_grade = serializers.CharField(source='subject.grade.name', read_only=True)
-    
-    class Meta:
-        model = VectorSnapshot
-        fields = ['id', 'grade', 'grade_name', 'subject', 'subject_name', 'subject_grade', 
-                  'snapshot_type', 'snapshot_file', 'created_at', 'updated_at']
+        fields = ['id', 'title', 'file', 'course', 'file_type']

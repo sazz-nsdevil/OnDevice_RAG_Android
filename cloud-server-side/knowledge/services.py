@@ -4,6 +4,7 @@ from typing import List, Dict, Any
 import numpy as np
 import os
 from pathlib import Path
+import sys
 
 
 # Set up embedding cache directory
@@ -44,23 +45,52 @@ class EmbeddingService:
             
             # Load tokenizer
             tokenizer_path = os.path.join(self.model_path, "tokenizer.json")
+            if not os.path.exists(tokenizer_path):
+                raise FileNotFoundError(f"Tokenizer not found at {tokenizer_path}")
             self.tokenizer = Tokenizer.from_file(tokenizer_path)
             
-            # Load ONNX session
-            onnx_model_path = os.path.join(self.model_path, "model.onnx")
-            if not os.path.exists(onnx_model_path):
-                # Try alternative names
-                onnx_files = [f for f in os.listdir(self.model_path) if f.endswith('.onnx')]
-                if onnx_files:
-                    onnx_model_path = os.path.join(self.model_path, onnx_files[0])
-                else:
-                    raise FileNotFoundError("No ONNX model file found")
+            # Load ONNX session - search recursively for .onnx files
+            onnx_model_path = self._find_onnx_model(self.model_path)
+            if not onnx_model_path:
+                raise FileNotFoundError(f"No ONNX model file found in {self.model_path}")
             
             self.session = ort.InferenceSession(onnx_model_path, providers=['CPUExecutionProvider'])
-            print("ONNX model loaded successfully")
+            print(f"ONNX model loaded successfully from: {onnx_model_path}")
             
         except ImportError as e:
             raise ImportError(f"Required packages not installed: {e}. Install with: uv pip install huggingface-hub onnxruntime tokenizers")
+    
+    def _find_onnx_model(self, root_path: str) -> str:
+        """
+        Recursively search for ONNX model files.
+        Prioritizes model.onnx, then others.
+        """
+        import glob
+        
+        # First try model.onnx in root
+        model_path = os.path.join(root_path, "model.onnx")
+        if os.path.exists(model_path):
+            return model_path
+        
+        # Search in onnx subdirectory
+        onnx_dir = os.path.join(root_path, "onnx")
+        if os.path.isdir(onnx_dir):
+            model_path = os.path.join(onnx_dir, "model.onnx")
+            if os.path.exists(model_path):
+                return model_path
+            
+            # Try any .onnx file in onnx directory
+            onnx_files = glob.glob(os.path.join(onnx_dir, "*.onnx"))
+            if onnx_files:
+                return onnx_files[0]
+        
+        # Recursively search all subdirectories
+        for root, dirs, files in os.walk(root_path):
+            for file in files:
+                if file.endswith('.onnx'):
+                    return os.path.join(root, file)
+        
+        return None
     
     def embed(self, text: str) -> List[float]:
         """Generate embedding for text"""
@@ -73,14 +103,35 @@ class EmbeddingService:
             input_ids = np.array([encoded.ids], dtype=np.int64)
             attention_mask = np.array([encoded.attention_mask], dtype=np.int64)
             
+            # Create token_type_ids (all zeros for BERT-like models)
+            token_type_ids = np.zeros_like(input_ids, dtype=np.int64)
+            
+            # Prepare input feed with all required inputs
+            input_feed = {}
+            for input_node in self.session.get_inputs():
+                input_name = input_node.name
+                if input_name == 'input_ids':
+                    input_feed[input_name] = input_ids
+                elif input_name == 'attention_mask':
+                    input_feed[input_name] = attention_mask
+                elif input_name == 'token_type_ids':
+                    input_feed[input_name] = token_type_ids
+            
             # Run ONNX inference
-            input_name = self.session.get_inputs()[0].name
-            output_name = self.session.get_outputs()[0].name
+            output_names = [output.name for output in self.session.get_outputs()]
+            embeddings = self.session.run(output_names, input_feed)
             
-            embedding = self.session.run([output_name], {input_name: input_ids})[0]
+            # Return the last hidden state (embeddings) - first output typically
+            embedding = embeddings[0]
             
-            # Return flattened embedding
-            return embedding[0].tolist() if embedding.ndim > 1 else embedding.tolist()
+            # Pool the embeddings (use mean pooling of last hidden state)
+            if embedding.ndim > 2:
+                # Remove batch dimension and average across sequence
+                embedding = embedding[0].mean(axis=0)
+            elif embedding.ndim == 2:
+                embedding = embedding[0].mean(axis=0)
+            
+            return embedding.tolist()
         
         except Exception as e:
             print(f"Error generating embedding: {e}")
@@ -103,52 +154,43 @@ class ChunkingService:
     """Service for chunking documents using LangChain"""
     
     @staticmethod
-    def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> list:
+    def chunk_text(text: str, chunk_size: int = 200, chunk_overlap: int = 50) -> list:
         """
         Chunk text using LangChain's RecursiveCharacterTextSplitter.
         
         Args:
             text: Text to chunk
-            chunk_size: Size of each chunk in characters
+            chunk_size: Size of each chunk in characters (200 = more granular chunks)
             chunk_overlap: Overlap between chunks in characters
         
         Returns:
             List of text chunks
         """
-        try:
-            from langchain_text_splitters import RecursiveCharacterTextSplitter
-            
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                separators=["\n\n", "\n", ".", " ", ""]
-            )
-            chunks = splitter.split_text(text)
-            return chunks if chunks else [text]
-        except ImportError:
-            # Fallback to simple sentence-based chunking
-            print("Warning: langchain_text_splitters not available. Using fallback chunking.")
-            return ChunkingService._fallback_chunk(text, chunk_size)
-    
-    @staticmethod
-    def _fallback_chunk(text: str, chunk_size: int = 1000) -> list:
-        """Fallback chunking by splitting on newlines and periods"""
-        sentences = text.split('\n')
-        chunks = []
-        current_chunk = ""
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
         
-        for sentence in sentences:
-            if len(current_chunk) + len(sentence) < chunk_size:
-                current_chunk += sentence + "\n"
-            else:
-                if current_chunk.strip():
-                    chunks.append(current_chunk.strip())
-                current_chunk = sentence + "\n"
+        print(f"\n[CHUNKING] Input text length: {len(text)} characters", flush=True)
+        sys.stdout.flush()
         
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=["\n\n", "\n", ".", " ", ""]
+        )
+        chunks = splitter.split_text(text)
         
-        return chunks if chunks else [text]
+        # Ensure we have chunks
+        if not chunks:
+            chunks = [text]
+        
+        # Remove any empty chunks
+        chunks = [c for c in chunks if c.strip()]
+        
+        print(f"[CHUNKING] Total chunks created: {len(chunks)}", flush=True)
+        for i, chunk in enumerate(chunks[:3]):
+            print(f"  Chunk {i}: {len(chunk)} chars, preview: {chunk[:80]}...", flush=True)
+        sys.stdout.flush()
+        
+        return chunks
 
 
 class DocumentParsingService:
@@ -162,17 +204,47 @@ class DocumentParsingService:
     
     @staticmethod
     def parse_pdf(file_path: str) -> str:
-        """Parse PDF file"""
+        """Parse PDF file using pdfplumber for better text extraction"""
         try:
-            from PyPDF2 import PdfReader
+            import pdfplumber
             text = ""
-            with open(file_path, 'rb') as f:
-                reader = PdfReader(f)
-                for page in reader.pages:
-                    text += page.extract_text()
+            with pdfplumber.open(file_path) as pdf:
+                num_pages = len(pdf.pages)
+                print(f"\n[PDF PARSING] Total pages: {num_pages}", flush=True)
+                sys.stdout.flush()
+                
+                for idx, page in enumerate(pdf.pages):
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n\n"
+                    
+                    if idx < 3 or idx == num_pages - 1 or (idx + 1) % 50 == 0:
+                        print(f"  Page {idx + 1}/{num_pages}: {len(page_text) if page_text else 0} chars", flush=True)
+                    sys.stdout.flush()
+            
+            print(f"[PDF PARSING] Total extracted text: {len(text)} characters\n", flush=True)
+            sys.stdout.flush()
             return text
         except ImportError:
-            raise ImportError("PyPDF2 is required for PDF parsing")
+            # Fallback to PyPDF2
+            print("[PDF PARSING] pdfplumber not available, using PyPDF2", flush=True)
+            try:
+                from PyPDF2 import PdfReader
+                text = ""
+                with open(file_path, 'rb') as f:
+                    reader = PdfReader(f)
+                    print(f"[PDF PARSING] Total pages: {len(reader.pages)}", flush=True)
+                    for idx, page in enumerate(reader.pages):
+                        page_text = page.extract_text()
+                        if page_text:
+                            text += page_text + "\n\n"
+                        if idx < 3 or idx == len(reader.pages) - 1:
+                            print(f"  Page {idx + 1}: {len(page_text) if page_text else 0} chars", flush=True)
+                    print(f"[PDF PARSING] Total extracted text: {len(text)} characters", flush=True)
+                sys.stdout.flush()
+                return text
+            except ImportError:
+                raise ImportError("Either pdfplumber or PyPDF2 is required for PDF parsing")
     
     @staticmethod
     def parse_docx(file_path: str) -> str:
@@ -199,137 +271,5 @@ class DocumentParsingService:
 
 
 class VectorSnapshotService:
-    """Service for creating and managing vector snapshots for mobile"""
-    
-    @staticmethod
-    def create_snapshot_db(data: List[Dict[str, Any]], output_path: str) -> None:
-        """
-        Create a SQLite database with vector data for mobile.
-        
-        Database schema:
-        - chunks: id, text, chunk_index, document_id, subject_id, grade_id
-        - embeddings: id, chunk_id, vector (JSON)
-        - documents: id, title, subject_id, grade_id
-        - subjects: id, name, grade_id
-        - grades: id, name
-        """
-        conn = sqlite3.connect(output_path)
-        cursor = conn.cursor()
-        
-        # Create tables
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS grades (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS subjects (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                grade_id INTEGER NOT NULL,
-                FOREIGN KEY (grade_id) REFERENCES grades(id),
-                UNIQUE(name, grade_id)
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS documents (
-                id INTEGER PRIMARY KEY,
-                title TEXT NOT NULL,
-                subject_id INTEGER NOT NULL,
-                FOREIGN KEY (subject_id) REFERENCES subjects(id)
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS chunks (
-                id INTEGER PRIMARY KEY,
-                text TEXT NOT NULL,
-                chunk_index INTEGER NOT NULL,
-                document_id INTEGER NOT NULL,
-                FOREIGN KEY (document_id) REFERENCES documents(id)
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS embeddings (
-                id INTEGER PRIMARY KEY,
-                chunk_id INTEGER NOT NULL UNIQUE,
-                vector TEXT NOT NULL,
-                FOREIGN KEY (chunk_id) REFERENCES chunks(id)
-            )
-        ''')
-        
-        # Insert data
-        for item in data:
-            # Insert or get grade
-            cursor.execute('INSERT OR IGNORE INTO grades (name) VALUES (?)', (item['grade_name'],))
-            grade_id = cursor.execute('SELECT id FROM grades WHERE name = ?', (item['grade_name'],)).fetchone()[0]
-            
-            # Insert or get subject
-            cursor.execute('INSERT OR IGNORE INTO subjects (name, grade_id) VALUES (?, ?)', 
-                          (item['subject_name'], grade_id))
-            subject_id = cursor.execute('SELECT id FROM subjects WHERE name = ? AND grade_id = ?', 
-                                       (item['subject_name'], grade_id)).fetchone()[0]
-            
-            # Insert or get document
-            cursor.execute('INSERT OR IGNORE INTO documents (title, subject_id) VALUES (?, ?)', 
-                          (item['document_title'], subject_id))
-            doc_id = cursor.execute('SELECT id FROM documents WHERE title = ? AND subject_id = ?', 
-                                   (item['document_title'], subject_id)).fetchone()[0]
-            
-            # Insert chunk
-            cursor.execute('INSERT INTO chunks (text, chunk_index, document_id) VALUES (?, ?, ?)', 
-                          (item['chunk_text'], item['chunk_index'], doc_id))
-            chunk_id = cursor.lastrowid
-            
-            # Insert embedding (vector as JSON string)
-            vector_json = json.dumps(item['embedding'])
-            cursor.execute('INSERT INTO embeddings (chunk_id, vector) VALUES (?, ?)', 
-                          (chunk_id, vector_json))
-        
-        conn.commit()
-        conn.close()
-    
-    @staticmethod
-    def export_snapshot(grade_id: int = None, subject_id: int = None, output_path: str = None) -> str:
-        """
-        Export vector snapshot for a grade or subject.
-        Returns the path to the created SQLite file.
-        """
-        from .models import Embedding, Chunk, Document, Subject, Grade
-        
-        if subject_id:
-            subject = Subject.objects.get(id=subject_id)
-            embeddings = Embedding.objects.filter(chunk__document__subject_id=subject_id)
-            label = f"{subject.grade.name}_{subject.name}".replace(" ", "_")
-        elif grade_id:
-            embeddings = Embedding.objects.filter(chunk__document__subject__grade_id=grade_id)
-            grade = Grade.objects.get(id=grade_id)
-            label = grade.name.replace(" ", "_")
-        else:
-            raise ValueError("Either grade_id or subject_id must be provided")
-        
-        # Prepare data
-        data = []
-        for emb in embeddings:
-            chunk = emb.chunk
-            doc = chunk.document
-            subject = doc.subject
-            
-            data.append({
-                'grade_name': subject.grade.name,
-                'subject_name': subject.name,
-                'document_title': doc.title,
-                'chunk_text': chunk.text,
-                'chunk_index': chunk.chunk_index,
-                'embedding': emb.vector,
-            })
-        
-        if not output_path:
-            output_path = f"/tmp/{label}_snapshot.db"
-        
-        VectorSnapshotService.create_snapshot_db(data, output_path)
-        return output_path
+    """Service removed - vector exports now handled directly in views"""
+    pass

@@ -1,43 +1,22 @@
 from django.contrib import admin
-from .models import Grade, Subject, Document, Chunk, Embedding, VectorSnapshot
+from .models import Course, Document, Chunk
 
 
-@admin.register(Grade)
-class GradeAdmin(admin.ModelAdmin):
-    list_display = ['name', 'created_at']
-    search_fields = ['name']
-
-
-@admin.register(Subject)
-class SubjectAdmin(admin.ModelAdmin):
-    list_display = ['name', 'grade', 'created_at']
-    search_fields = ['name', 'grade__name']
-    list_filter = ['grade']
+@admin.register(Course)
+class CourseAdmin(admin.ModelAdmin):
+    list_display = ['code', 'name', 'created_at']
+    search_fields = ['code', 'name']
 
 
 @admin.register(Document)
 class DocumentAdmin(admin.ModelAdmin):
-    list_display = ['title', 'subject', 'file_type', 'created_at']
-    search_fields = ['title', 'subject__name']
-    list_filter = ['file_type', 'subject__grade', 'subject']
+    list_display = ['title', 'course', 'file_type', 'created_at']
+    search_fields = ['title', 'course__code']
+    list_filter = ['file_type', 'course']
 
 
 @admin.register(Chunk)
 class ChunkAdmin(admin.ModelAdmin):
-    list_display = ['document', 'chunk_index', 'created_at']
+    list_display = ['id', 'document', 'chunk_index', 'created_at']
     search_fields = ['document__title', 'text']
-    list_filter = ['document__subject__grade']
-
-
-@admin.register(Embedding)
-class EmbeddingAdmin(admin.ModelAdmin):
-    list_display = ['chunk', 'embedding_model', 'created_at']
-    search_fields = ['chunk__document__title']
-    list_filter = ['embedding_model']
-
-
-@admin.register(VectorSnapshot)
-class VectorSnapshotAdmin(admin.ModelAdmin):
-    list_display = ['__str__', 'snapshot_type', 'created_at']
-    list_filter = ['snapshot_type', 'grade', 'subject']
-    search_fields = ['grade__name', 'subject__name']
+    list_filter = ['document']

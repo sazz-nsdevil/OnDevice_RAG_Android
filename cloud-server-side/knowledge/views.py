@@ -4,122 +4,138 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.http import FileResponse
 import os
+import sqlite3
+import json
 import tempfile
 
-from .models import Grade, Subject, Document, Chunk, Embedding, VectorSnapshot
+from .models import Course, Document, Chunk
 from .serializers import (
-    GradeSerializer, SubjectSerializer, DocumentSerializer, 
-    DocumentUploadSerializer, VectorSnapshotSerializer, ChunkWithEmbeddingSerializer
+    CourseSerializer, DocumentSerializer, DocumentDetailSerializer,
+    DocumentUploadSerializer, ChunkSerializer
 )
 from .services import (
-    EmbeddingService, ChunkingService, DocumentParsingService, VectorSnapshotService
+    EmbeddingService, ChunkingService, DocumentParsingService
 )
 
 
-class GradeViewSet(viewsets.ModelViewSet):
+class CourseViewSet(viewsets.ModelViewSet):
     """
-    Grade Management API
+    Course Management API
     
-    CRUD operations for managing grade levels (e.g., Grade 7, Grade 8).
-    Each grade can have multiple subjects.
+    CRUD operations for managing courses (e.g., SCI10, MATH09).
     
-    list: Retrieve all grades
-    create: Create a new grade
-    retrieve: Get details of a specific grade
-    update: Update a grade
-    destroy: Delete a grade
+    list: Get all courses
+    create: Create a new course
+    retrieve: Get course details with documents
+    update: Update course
+    destroy: Delete course
     """
-    queryset = Grade.objects.all()
-    serializer_class = GradeSerializer
-    
-    @action(detail=True, methods=['get'])
-    def subjects(self, request, pk=None):
-        """Get all subjects for a grade"""
-        grade = self.get_object()
-        subjects = grade.subjects.all()
-        serializer = SubjectSerializer(subjects, many=True)
-        return Response(serializer.data)
-    
-    @action(detail=True, methods=['post'])
-    def create_snapshot(self, request, pk=None):
-        """Create vector snapshot for entire grade"""
-        grade = self.get_object()
-        try:
-            snapshot_path = VectorSnapshotService.export_snapshot(grade_id=grade.id)
-            
-            # Save to VectorSnapshot model
-            snapshot = VectorSnapshot.objects.create(
-                grade=grade,
-                snapshot_type='grade',
-                snapshot_file=snapshot_path
-            )
-            serializer = VectorSnapshotSerializer(snapshot)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
-
-class SubjectViewSet(viewsets.ModelViewSet):
-    """
-    Subject Management API
-    
-    CRUD operations for managing subjects within grades.
-    Each subject belongs to one grade and can have multiple documents.
-    
-    list: Retrieve all subjects (optionally filter by grade_id)
-    create: Create a new subject
-    retrieve: Get details of a specific subject
-    update: Update a subject
-    destroy: Delete a subject
-    """
-    queryset = Subject.objects.all()
-    serializer_class = SubjectSerializer
-    
-    def get_queryset(self):
-        grade_id = self.request.query_params.get('grade_id')
-        if grade_id:
-            return Subject.objects.filter(grade_id=grade_id)
-        return Subject.objects.all()
+    queryset = Course.objects.all()
+    serializer_class = CourseSerializer
     
     @action(detail=True, methods=['get'])
     def documents(self, request, pk=None):
-        """Get all documents for a subject"""
-        subject = self.get_object()
-        documents = subject.documents.all()
+        """Get all documents for a course"""
+        course = self.get_object()
+        documents = course.documents.all()
         serializer = DocumentSerializer(documents, many=True)
         return Response(serializer.data)
     
-    @action(detail=True, methods=['post'])
-    def create_snapshot(self, request, pk=None):
-        """Create vector snapshot for subject"""
-        subject = self.get_object()
+    @action(detail=True, methods=['get'])
+    def download_knowledge_base(self, request, pk=None):
+        """Download knowledge base as SQLite vector snapshot"""
+        course = self.get_object()
+        
         try:
-            snapshot_path = VectorSnapshotService.export_snapshot(subject_id=subject.id)
+            # Get all chunks for this course
+            chunks = Chunk.objects.filter(document__course=course).select_related('document')
             
-            # Save to VectorSnapshot model
-            snapshot = VectorSnapshot.objects.create(
-                subject=subject,
-                snapshot_type='subject',
-                snapshot_file=snapshot_path
+            if not chunks.exists():
+                return Response({'error': 'No chunks found for this course'}, status=status.HTTP_404_NOT_FOUND)
+            
+            # Create SQLite database
+            with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp_file:
+                db_path = tmp_file.name
+            
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            
+            # Create schema
+            cursor.execute('''
+                CREATE TABLE courses (
+                    id INTEGER PRIMARY KEY,
+                    code TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL
+                )
+            ''')
+            
+            cursor.execute('''
+                CREATE TABLE documents (
+                    id INTEGER PRIMARY KEY,
+                    course_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    file_type TEXT,
+                    FOREIGN KEY (course_id) REFERENCES courses(id)
+                )
+            ''')
+            
+            cursor.execute('''
+                CREATE TABLE chunks (
+                    id INTEGER PRIMARY KEY,
+                    document_id INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    vector TEXT NOT NULL,
+                    embedding_model TEXT,
+                    FOREIGN KEY (document_id) REFERENCES documents(id)
+                )
+            ''')
+            
+            # Insert course
+            cursor.execute('INSERT INTO courses (id, code, name) VALUES (?, ?, ?)',
+                          (course.id, course.code, course.name))
+            
+            # Insert documents and chunks
+            for chunk in chunks:
+                doc = chunk.document
+                
+                # Insert document
+                cursor.execute('INSERT OR IGNORE INTO documents (id, course_id, title, file_type) VALUES (?, ?, ?, ?)',
+                              (doc.id, course.id, doc.title, doc.file_type))
+                
+                # Insert chunk
+                vector_json = json.dumps(chunk.vector)
+                cursor.execute('INSERT INTO chunks (document_id, text, chunk_index, vector, embedding_model) VALUES (?, ?, ?, ?, ?)',
+                              (doc.id, chunk.text, chunk.chunk_index, vector_json, chunk.embedding_model))
+            
+            conn.commit()
+            conn.close()
+            
+            # Return file
+            response = FileResponse(
+                open(db_path, 'rb'),
+                as_attachment=True,
+                filename=f"{course.code}_knowledge_base.db"
             )
-            serializer = VectorSnapshotSerializer(snapshot)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            return response
+            
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class DocumentViewSet(viewsets.ModelViewSet):
     """
-    Document Management API
+    Document Upload & Management API
     
-    CRUD operations for uploading and managing documents.
-    Automatically processes documents: parses, chunks, and generates embeddings.
+    Upload documents to a course. Documents are automatically:
+    - Parsed (TXT, PDF, DOCX)
+    - Split into chunks (with overlap)
+    - Vectorized using ONNX embeddings
+    - Saved to database
     
-    Supported formats: TXT, PDF, DOCX
-    
-    list: Retrieve all documents (filter by subject_id or grade_id)
-    create: Upload new document (multipart form data)
-    retrieve: Get document details with chunks and embeddings
+    list: Get all documents (filter by course_id)
+    create: Upload new document
+    retrieve: Get document with chunks
     update: Update document metadata
     destroy: Delete document
     """
@@ -130,20 +146,15 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def get_serializer_class(self):
         if self.action == 'create':
             return DocumentUploadSerializer
+        elif self.action == 'retrieve':
+            return DocumentDetailSerializer
         return DocumentSerializer
     
     def get_queryset(self):
-        subject_id = self.request.query_params.get('subject_id')
-        grade_id = self.request.query_params.get('grade_id')
-        
-        queryset = Document.objects.all()
-        
-        if subject_id:
-            queryset = queryset.filter(subject_id=subject_id)
-        elif grade_id:
-            queryset = queryset.filter(subject__grade_id=grade_id)
-        
-        return queryset
+        course_id = self.request.query_params.get('course_id')
+        if course_id:
+            return Document.objects.filter(course_id=course_id)
+        return Document.objects.all()
     
     def create(self, request, *args, **kwargs):
         """Upload and process document"""
@@ -151,10 +162,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         document = serializer.save()
         
-        # Process document: parse, chunk, and embed
         try:
             self._process_document(document)
-            response_serializer = DocumentSerializer(document)
+            response_serializer = DocumentDetailSerializer(document)
             return Response(response_serializer.data, status=status.HTTP_201_CREATED)
         except Exception as e:
             document.delete()
@@ -173,15 +183,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
         embedding_service = EmbeddingService()
         embeddings = embedding_service.embed_batch(chunks_text)
         
-        # Save chunks and embeddings to database
+        # Save chunks and vectors to database
         for idx, (chunk_text, embedding) in enumerate(zip(chunks_text, embeddings)):
-            chunk = Chunk.objects.create(
+            Chunk.objects.create(
                 document=document,
                 text=chunk_text,
-                chunk_index=idx
-            )
-            Embedding.objects.create(
-                chunk=chunk,
+                chunk_index=idx,
                 vector=embedding,
                 embedding_model=embedding_service.model_name
             )
@@ -191,51 +198,5 @@ class DocumentViewSet(viewsets.ModelViewSet):
         """Get chunks for a document"""
         document = self.get_object()
         chunks = document.chunks.all()
-        serializer = ChunkWithEmbeddingSerializer(chunks, many=True)
+        serializer = ChunkSerializer(chunks, many=True)
         return Response(serializer.data)
-
-
-class VectorSnapshotViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    Vector Snapshot Download API
-    
-    Read-only endpoints for downloading vector snapshots.
-    Snapshots contain all chunks and embeddings for a grade or subject.
-    
-    Exported as SQLite database for mobile app to directly load.
-    
-    list: List all snapshots (filter by grade_id or subject_id)
-    retrieve: Get snapshot metadata
-    """
-    queryset = VectorSnapshot.objects.all()
-    serializer_class = VectorSnapshotSerializer
-    
-    def get_queryset(self):
-        grade_id = self.request.query_params.get('grade_id')
-        subject_id = self.request.query_params.get('subject_id')
-        
-        queryset = VectorSnapshot.objects.all()
-        
-        if grade_id:
-            queryset = queryset.filter(grade_id=grade_id)
-        elif subject_id:
-            queryset = queryset.filter(subject_id=subject_id)
-        
-        return queryset
-    
-    @action(detail=True, methods=['get'])
-    def download(self, request, pk=None):
-        """Download snapshot as SQLite file"""
-        snapshot = self.get_object()
-        
-        if snapshot.snapshot_file:
-            file_path = snapshot.snapshot_file.path
-            file_name = os.path.basename(file_path)
-            
-            return FileResponse(
-                open(file_path, 'rb'),
-                as_attachment=True,
-                filename=file_name
-            )
-        
-        return Response({'error': 'Snapshot file not found'}, status=status.HTTP_404_NOT_FOUND)
