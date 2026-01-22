@@ -154,7 +154,7 @@ class ChunkingService:
     """Service for chunking documents using LangChain"""
     
     @staticmethod
-    def chunk_text(text: str, chunk_size: int = 200, chunk_overlap: int = 50) -> list:
+    def chunk_text(text: str, chunk_size: int = 400, chunk_overlap: int = 120) -> list:
         """
         Chunk text using LangChain's RecursiveCharacterTextSplitter.
         

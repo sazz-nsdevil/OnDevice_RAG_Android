@@ -32,6 +32,11 @@ env/
 .env.local
 .env.*.local
 
+# Embeddings cache (large files)
+pretrained_models/
+cloud-server-side/pretrained_models/
+
+
 # Django
 *.log
 db.sqlite3
